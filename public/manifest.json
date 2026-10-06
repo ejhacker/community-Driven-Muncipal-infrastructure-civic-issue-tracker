@@ -1,0 +1,17 @@
+{
+  "name": "NagrikPulse - Community Municipal Tracker",
+  "short_name": "NagrikPulse",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#042f2e",
+  "theme_color": "#0d9488",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512' fill='%230d9488'><rect width='512' height='512' rx='128' fill='%23042f2e'/><path d='M256 96c-70.7 0-128 57.3-128 128 0 96 128 224 128 224s128-128 128-224c0-70.7-57.3-128-128-128zm0 176c-26.5 0-48-21.5-48-48s21.5-48 48-48 48 21.5 48 48-21.5 48-48 48z' fill='%232dd4bf'/></svg>",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

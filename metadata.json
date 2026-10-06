@@ -1,0 +1,6 @@
+{
+  "name": "NagrikPulse - Civic Issue Tracker",
+  "description": "Community-driven municipal infrastructure & civic issue tracker with community validation, transparent SLA triage, offline PWA reporting, and AI assistance.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
