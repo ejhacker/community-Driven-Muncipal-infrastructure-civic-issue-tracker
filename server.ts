@@ -2,6 +2,8 @@ import express, { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
 import crypto from 'crypto';
+import http from 'http';
+import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
 
@@ -669,7 +671,110 @@ app.get('/api/geo/reverse-geocode', async (req: Request, res: Response): Promise
   res.json({ success: true, ...fallbackResult, cached: false, fallback: true });
 });
 
-// 3. Duplicate Detection (PostGIS logic mirrored in Node/SQL)
+// 3. Real-Time Live GPS Telemetry & Proximity Engine
+interface FieldOfficerTelemetry {
+  userId: string;
+  latitude: number;
+  longitude: number;
+  accuracyMeters: number;
+  speedKmh?: number;
+  headingDegrees?: number;
+  updatedAt: string;
+}
+
+const activeOfficerTrackers = new Map<string, FieldOfficerTelemetry>();
+
+app.post('/api/gps/update-telemetry', (req: Request, res: Response) => {
+  const { userId = 'officer-mobile', latitude, longitude, accuracy = 5, speedKmh = 0, heading = 0 } = req.body;
+
+  if (typeof latitude !== 'number' || typeof longitude !== 'number') {
+    res.status(400).json({ error: 'Valid latitude and longitude required' });
+    return;
+  }
+
+  const telemetry: FieldOfficerTelemetry = {
+    userId,
+    latitude,
+    longitude,
+    accuracyMeters: accuracy,
+    speedKmh,
+    headingDegrees: heading,
+    updatedAt: new Date().toISOString(),
+  };
+
+  activeOfficerTrackers.set(userId, telemetry);
+
+  // Compute nearest open civic issue
+  let nearestIssue: any = null;
+  let minDistance = Infinity;
+
+  issuesDB.forEach((issue) => {
+    if (issue.status !== 'resolved') {
+      const dist = getHaversineDistance(latitude, longitude, issue.latitude, issue.longitude);
+      if (dist < minDistance) {
+        minDistance = dist;
+        nearestIssue = issue;
+      }
+    }
+  });
+
+  const roundedDistance = minDistance < Infinity ? Math.round(minDistance) : null;
+  const isNearHazard = roundedDistance !== null && roundedDistance <= 35;
+
+  res.json({
+    success: true,
+    telemetry,
+    nearestIssue: nearestIssue ? {
+      id: nearestIssue.id,
+      ticketNumber: nearestIssue.ticketNumber,
+      title: nearestIssue.title,
+      category: nearestIssue.category,
+      severity: nearestIssue.severity,
+      distanceMeters: roundedDistance,
+    } : null,
+    isNearHazard,
+  });
+});
+
+app.get('/api/gps/live-tracking', (_req: Request, res: Response) => {
+  const trackers = Array.from(activeOfficerTrackers.values());
+  res.json({
+    activeTrackers: trackers,
+    totalCount: trackers.length,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.get('/api/gps/proximity-alerts', (req: Request, res: Response) => {
+  const lat = parseFloat(req.query.lat as string);
+  const lng = parseFloat(req.query.lng as string);
+  const radius = parseFloat((req.query.radius as string) || '60');
+
+  if (isNaN(lat) || isNaN(lng)) {
+    res.status(400).json({ error: 'Valid numeric lat and lng required' });
+    return;
+  }
+
+  const nearby = issuesDB
+    .filter((issue) => issue.status !== 'resolved')
+    .map((issue) => {
+      const dist = getHaversineDistance(lat, lng, issue.latitude, issue.longitude);
+      return {
+        ...issue,
+        distanceMeters: Math.round(dist),
+      };
+    })
+    .filter((issue) => issue.distanceMeters <= radius)
+    .sort((a, b) => a.distanceMeters - b.distanceMeters);
+
+  res.json({
+    count: nearby.length,
+    radiusMeters: radius,
+    nearbyIssues: nearby,
+  });
+});
+
+// 4. Duplicate Detection (PostGIS logic mirrored in Node/SQL)
 app.post('/api/issues/check-duplicates', (req: Request, res: Response) => {
   const { latitude, longitude, category, radiusMeters = 65 } = req.body;
 
@@ -1021,9 +1126,115 @@ app.get('/api/stats', (_req: Request, res: Response) => {
 });
 
 // ----------------------------------------------------------------------------
+// PYTHON CORE ENGINE BRIDGE (Runs Python 3.10 Backend on Port 5050)
+// ----------------------------------------------------------------------------
+let pythonChildProcess: any = null;
+
+function launchPythonCore() {
+  try {
+    const pythonScript = path.resolve(__dirname, 'python_backend', 'app.py');
+    pythonChildProcess = spawn('python3', [pythonScript], {
+      env: { ...process.env, PORT: '5050' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    pythonChildProcess.stdout?.on('data', (chunk: Buffer) => {
+      console.log(`[Python Core stdout]: ${chunk.toString().trim()}`);
+    });
+
+    pythonChildProcess.stderr?.on('data', (chunk: Buffer) => {
+      console.warn(`[Python Core stderr]: ${chunk.toString().trim()}`);
+    });
+
+    pythonChildProcess.on('exit', (code: number) => {
+      console.log(`[Python Core process exited with code ${code}]`);
+    });
+  } catch (err: any) {
+    console.warn('[Python Core launch warning]:', err.message);
+  }
+}
+
+// Proxy all /api/python/* calls directly to the Python core engine
+app.all('/api/python/*', (req: Request, res: Response) => {
+  const targetPath = req.url.replace('/api/python', '/api');
+  const proxyReq = http.request(
+    {
+      hostname: '127.0.0.1',
+      port: 5050,
+      path: targetPath,
+      method: req.method,
+      headers: {
+        ...req.headers,
+        host: '127.0.0.1:5050',
+      },
+    },
+    (proxyRes) => {
+      res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
+      proxyRes.pipe(res);
+    }
+  );
+
+  proxyReq.on('error', (err) => {
+    res.status(502).json({
+      error: 'Python Core not reachable on port 5050',
+      details: err.message,
+      tip: 'The Python server runs automatically via python3 python_backend/app.py',
+    });
+  });
+
+  if (['POST', 'PUT', 'PATCH'].includes(req.method) && req.body) {
+    const bodyData = JSON.stringify(req.body);
+    proxyReq.setHeader('Content-Type', 'application/json');
+    proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
+    proxyReq.write(bodyData);
+  }
+  proxyReq.end();
+});
+
+// Dedicated Python Status Endpoint
+app.get('/api/python-status', (_req: Request, res: Response) => {
+  const pingReq = http.request(
+    {
+      hostname: '127.0.0.1',
+      port: 5050,
+      path: '/api/health',
+      method: 'GET',
+      timeout: 2000,
+    },
+    (pingRes) => {
+      let data = '';
+      pingRes.on('data', (c) => (data += c));
+      pingRes.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          res.json({
+            online: true,
+            pythonPort: 5050,
+            pythonCore: parsed,
+          });
+        } catch {
+          res.json({ online: true, pythonPort: 5050, raw: data });
+        }
+      });
+    }
+  );
+
+  pingReq.on('error', () => {
+    res.json({
+      online: false,
+      pythonPort: 5050,
+      message: 'Python Core process starting or standalone at python3 python_backend/app.py',
+    });
+  });
+
+  pingReq.end();
+});
+
+// ----------------------------------------------------------------------------
 // VITE MIDDLEWARE SETUP FOR LOCAL DEV & PRODUCTION SPA SERVING
 // ----------------------------------------------------------------------------
 async function startServer() {
+  launchPythonCore();
   if (process.env.NODE_ENV !== 'production') {
     // Dynamic import vite for dev server middleware
     const { createServer } = await import('vite');

@@ -1,0 +1,12 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+pydantic>=2.6.0
+google-genai>=0.1.1
+shapely>=2.0.3
+geopandas>=0.14.3
+SQLAlchemy>=2.0.28
+geoalchemy2>=0.14.6
+psycopg2-binary>=2.9.9
+requests>=2.31.0
+python-dotenv>=1.0.1
+websockets>=12.0

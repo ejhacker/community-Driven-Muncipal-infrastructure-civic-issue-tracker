@@ -13,7 +13,7 @@ import {
   SlidersHorizontal,
 } from 'lucide-react';
 import { UserRole } from '../types';
-import { Language, translations } from '../utils/translations';
+import { Language, translations } from '../utils';
 
 interface NavbarProps {
   currentView: 'map_list' | 'officer_board' | 'stats';

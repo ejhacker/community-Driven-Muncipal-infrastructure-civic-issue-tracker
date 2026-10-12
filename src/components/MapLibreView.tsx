@@ -5,10 +5,27 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 
 // Configure MapLibre GL worker URL for Vite bundling
 if (typeof maplibregl.setWorkerUrl === 'function') {
-  maplibregl.setWorkerUrl(maplibreWorkerUrl);
+  try {
+    maplibregl.setWorkerUrl(maplibreWorkerUrl);
+  } catch (err) {
+    console.warn('Failed to set MapLibre workerUrl:', err);
+  }
 }
 import { Issue } from '../types';
-import { MapPin, Navigation, AlertTriangle, Layers, Eye } from 'lucide-react';
+import { LiveGpsState } from '../utils';
+import {
+  MapPin,
+  Navigation,
+  AlertTriangle,
+  Layers,
+  Activity,
+  Footprints,
+  Compass,
+  Play,
+  Square,
+  Crosshair,
+  ShieldAlert,
+} from 'lucide-react';
 
 interface MapLibreViewProps {
   issues: Issue[];
@@ -20,6 +37,9 @@ interface MapLibreViewProps {
   duplicateRadiusMeters?: number;
   lowBandwidthMode?: boolean;
   userCoordinates?: { lat: number; lng: number } | null;
+  liveGpsState?: LiveGpsState;
+  onToggleLiveTracking?: () => void;
+  onSimulateWalk?: () => void;
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -43,6 +63,9 @@ export const MapLibreView: React.FC<MapLibreViewProps> = ({
   onCoordinatesChange,
   lowBandwidthMode = false,
   userCoordinates,
+  liveGpsState,
+  onToggleLiveTracking,
+  onSimulateWalk,
 }) => {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapInstance = useRef<maplibregl.Map | null>(null);
@@ -51,10 +74,11 @@ export const MapLibreView: React.FC<MapLibreViewProps> = ({
   const userLocationMarkerRef = useRef<maplibregl.Marker | null>(null);
   const [webGlSupported, setWebGlSupported] = useState(true);
   const [mapLoaded, setMapLoaded] = useState(false);
+  const [autoFollowUser, setAutoFollowUser] = useState(true);
 
   // Initial center: default to issues center, picker coords, user location, or Faridabad / Delhi-NCR
-  const defaultLat = userCoordinates?.lat || pickerCoordinates?.lat || (issues.length > 0 ? issues[0].latitude : 28.4089);
-  const defaultLng = userCoordinates?.lng || pickerCoordinates?.lng || (issues.length > 0 ? issues[0].longitude : 77.3178);
+  const defaultLat = liveGpsState?.latitude || userCoordinates?.lat || pickerCoordinates?.lat || (issues.length > 0 ? issues[0].latitude : 28.4089);
+  const defaultLng = liveGpsState?.longitude || userCoordinates?.lng || pickerCoordinates?.lng || (issues.length > 0 ? issues[0].longitude : 77.3178);
 
   useEffect(() => {
     if (lowBandwidthMode || !mapContainer.current) return;
@@ -106,13 +130,43 @@ export const MapLibreView: React.FC<MapLibreViewProps> = ({
             ],
           },
           center: [defaultLng, defaultLat],
-          zoom: 14.2,
+          zoom: 15.0,
         });
 
         map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
 
         map.on('load', () => {
           setMapLoaded(true);
+
+          // Add live GPS breadcrumb polyline source and layer
+          if (!map.getSource('live-breadcrumb-trail')) {
+            map.addSource('live-breadcrumb-trail', {
+              type: 'geojson',
+              data: {
+                type: 'Feature',
+                properties: {},
+                geometry: {
+                  type: 'LineString',
+                  coordinates: [],
+                },
+              },
+            });
+
+            map.addLayer({
+              id: 'live-breadcrumb-layer',
+              type: 'line',
+              source: 'live-breadcrumb-trail',
+              layout: {
+                'line-join': 'round',
+                'line-cap': 'round',
+              },
+              paint: {
+                'line-color': '#0284c7',
+                'line-width': 4.5,
+                'line-opacity': 0.85,
+              },
+            });
+          }
         });
 
         map.on('error', (e: any) => {
@@ -188,7 +242,7 @@ export const MapLibreView: React.FC<MapLibreViewProps> = ({
       el.addEventListener('click', (e) => {
         e.stopPropagation();
         onSelectIssue(issue);
-        map.flyTo({ center: [issue.longitude, issue.latitude], zoom: 15.5 });
+        map.flyTo({ center: [issue.longitude, issue.latitude], zoom: 16.0 });
       });
 
       const marker = new maplibregl.Marker({ element: el })
@@ -237,10 +291,16 @@ export const MapLibreView: React.FC<MapLibreViewProps> = ({
     }
   }, [pickerCoordinates, isPickerMode, mapLoaded, lowBandwidthMode]);
 
-  // Update Live User GPS Marker & Initial Fly-To
+  // Update Continuous Live GPS Telemetry, Heading & Breadcrumb Line
   useEffect(() => {
     const map = mapInstance.current;
-    if (!map || !mapLoaded || !userCoordinates || lowBandwidthMode) {
+    if (!map || !mapLoaded || lowBandwidthMode) return;
+
+    const currentCoords = liveGpsState?.isTracking
+      ? { lat: liveGpsState.latitude, lng: liveGpsState.longitude }
+      : userCoordinates;
+
+    if (!currentCoords) {
       if (userLocationMarkerRef.current) {
         userLocationMarkerRef.current.remove();
         userLocationMarkerRef.current = null;
@@ -248,40 +308,78 @@ export const MapLibreView: React.FC<MapLibreViewProps> = ({
       return;
     }
 
+    const heading = liveGpsState?.headingDegrees || 0;
+    const accuracy = liveGpsState?.accuracyMeters || 5.0;
+
+    // 1. Update / Create User Location Marker
     if (!userLocationMarkerRef.current) {
       const el = document.createElement('div');
-      el.className = 'user-gps-pulse-marker';
+      el.className = 'live-gps-user-beacon';
       el.innerHTML = `
-        <div style="position: relative; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center;">
-          <div style="position: absolute; width: 24px; height: 24px; background: rgba(2, 132, 199, 0.28); border-radius: 50%; box-shadow: 0 0 10px rgba(2, 132, 199, 0.4);"></div>
-          <div style="width: 14px; height: 14px; background: #0284c7; border: 2.5px solid #ffffff; border-radius: 50%; box-shadow: 0 2px 6px rgba(0,0,0,0.35);"></div>
+        <div style="position: relative; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;">
+          <div style="position: absolute; width: 32px; height: 32px; background: rgba(2, 132, 199, 0.25); border-radius: 50%; box-shadow: 0 0 12px rgba(2, 132, 199, 0.5); animation: pulse 1.6s infinite;"></div>
+          <div style="position: absolute; width: 14px; height: 14px; background: #0284c7; border: 2.5px solid #ffffff; border-radius: 50%; box-shadow: 0 2px 6px rgba(0,0,0,0.4);"></div>
+          <div id="gps-heading-arrow" style="position: absolute; top: 0; width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; border-bottom: 7px solid #0284c7; transform: rotate(${heading}deg) translateY(-8px);"></div>
         </div>
       `;
-      el.title = 'Your Current Live Location (GPS)';
+      el.title = `Live GPS Position: ${currentCoords.lat.toFixed(5)}, ${currentCoords.lng.toFixed(5)} (±${accuracy}m)`;
 
       const marker = new maplibregl.Marker({ element: el })
-        .setLngLat([userCoordinates.lng, userCoordinates.lat])
+        .setLngLat([currentCoords.lng, currentCoords.lat])
         .addTo(map);
 
       userLocationMarkerRef.current = marker;
-      map.flyTo({ center: [userCoordinates.lng, userCoordinates.lat], zoom: 15.2 });
+      map.flyTo({ center: [currentCoords.lng, currentCoords.lat], zoom: 15.5 });
     } else {
-      userLocationMarkerRef.current.setLngLat([userCoordinates.lng, userCoordinates.lat]);
+      userLocationMarkerRef.current.setLngLat([currentCoords.lng, currentCoords.lat]);
+      const arrow = document.getElementById('gps-heading-arrow');
+      if (arrow) {
+        arrow.style.transform = `rotate(${heading}deg) translateY(-8px)`;
+      }
     }
-  }, [userCoordinates, mapLoaded, lowBandwidthMode]);
+
+    // 2. Update Breadcrumb Polyline Trail
+    if (liveGpsState?.pathHistory && liveGpsState.pathHistory.length > 1) {
+      const geojsonSource = map.getSource('live-breadcrumb-trail') as maplibregl.GeoJSONSource;
+      if (geojsonSource) {
+        geojsonSource.setData({
+          type: 'Feature',
+          properties: {},
+          geometry: {
+            type: 'LineString',
+            coordinates: liveGpsState.pathHistory.map(([lat, lng]) => [lng, lat]),
+          },
+        });
+      }
+    }
+
+    // 3. Smooth Auto-Center on motion if enabled
+    if (autoFollowUser && liveGpsState?.isTracking) {
+      map.panTo([currentCoords.lng, currentCoords.lat], { duration: 800 });
+    }
+  }, [liveGpsState, userCoordinates, mapLoaded, lowBandwidthMode, autoFollowUser]);
 
   // Center on GPS button
   const handleLocateMe = () => {
+    if (liveGpsState?.isTracking && mapInstance.current) {
+      mapInstance.current.flyTo({
+        center: [liveGpsState.longitude, liveGpsState.latitude],
+        zoom: 16.5,
+      });
+      return;
+    }
+
     if (!navigator.geolocation) return;
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         const coords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
         if (onCoordinatesChange) onCoordinatesChange(coords);
         if (mapInstance.current) {
-          mapInstance.current.flyTo({ center: [coords.lng, coords.lat], zoom: 15.5 });
+          mapInstance.current.flyTo({ center: [coords.lng, coords.lat], zoom: 16.0 });
         }
       },
-      (err) => console.warn('Geolocation failed:', err)
+      (err) => console.warn('Geolocation failed:', err),
+      { enableHighAccuracy: true }
     );
   };
 
@@ -332,41 +430,142 @@ export const MapLibreView: React.FC<MapLibreViewProps> = ({
   }
 
   return (
-    <div className="relative w-full h-full min-h-[360px] rounded-xl overflow-hidden shadow-sm border border-slate-200">
+    <div className="relative w-full h-full min-h-[380px] rounded-xl overflow-hidden shadow-sm border border-slate-200">
       <div ref={mapContainer} className="w-full h-full" />
 
-      {/* Floating Controls */}
+      {/* Top Floating Proximity Hazard Alert */}
+      {liveGpsState?.isTracking &&
+        liveGpsState.nearestIssueDistanceMeters !== null &&
+        liveGpsState.nearestIssueDistanceMeters <= 40 && (
+          <div className="absolute top-3 left-3 right-14 z-20 bg-rose-600 text-white rounded-xl px-3 py-2 shadow-xl flex items-center justify-between gap-2 animate-bounce">
+            <div className="flex items-center gap-2 min-w-0">
+              <ShieldAlert className="w-4 h-4 shrink-0 text-amber-200" />
+              <div className="text-xs font-bold truncate">
+                Proximity Alert: {liveGpsState.nearestIssueDistanceMeters}m from reported hazard!
+              </div>
+            </div>
+            <span className="text-[10px] bg-rose-800 text-rose-100 font-semibold px-2 py-0.5 rounded shrink-0">
+              On-Ground Match
+            </span>
+          </div>
+        )}
+
+      {/* Top-Right Floating Live GPS Action Bar */}
+      <div className="absolute top-3 right-12 z-10 flex items-center gap-1.5 bg-white/95 backdrop-blur-md p-1 rounded-xl shadow-md border border-slate-200 text-xs">
+        {onToggleLiveTracking && (
+          <button
+            onClick={onToggleLiveTracking}
+            className={`px-2.5 py-1.5 rounded-lg font-bold flex items-center gap-1.5 transition-all ${
+              liveGpsState?.isTracking
+                ? 'bg-rose-600 hover:bg-rose-700 text-white shadow-xs'
+                : 'bg-teal-700 hover:bg-teal-800 text-white shadow-xs'
+            }`}
+            title="Start or Stop continuous Live GPS tracking"
+          >
+            {liveGpsState?.isTracking ? (
+              <>
+                <Square className="w-3.5 h-3.5" />
+                <span>Stop GPS</span>
+              </>
+            ) : (
+              <>
+                <Activity className="w-3.5 h-3.5 animate-pulse" />
+                <span>Start Live GPS</span>
+              </>
+            )}
+          </button>
+        )}
+
+        {onSimulateWalk && (
+          <button
+            onClick={onSimulateWalk}
+            className={`px-2 py-1.5 rounded-lg font-semibold flex items-center gap-1 transition-all ${
+              liveGpsState?.isSimulated
+                ? 'bg-blue-600 text-white'
+                : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+            }`}
+            title="Simulate field walking path on Mathura Road / Sector 15 for instant testing"
+          >
+            <Footprints className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Simulate Walk</span>
+          </button>
+        )}
+
+        <button
+          onClick={() => setAutoFollowUser(!autoFollowUser)}
+          className={`p-1.5 rounded-lg transition-all ${
+            autoFollowUser ? 'bg-sky-100 text-sky-800 font-bold' : 'text-slate-500 hover:bg-slate-100'
+          }`}
+          title="Auto-pan map to follow user movement"
+        >
+          <Crosshair className="w-4 h-4" />
+        </button>
+      </div>
+
+      {/* Floating Bottom-Right Recenter Button */}
       <div className="absolute bottom-4 right-4 z-10 flex flex-col gap-2">
         <button
           onClick={handleLocateMe}
-          title="Detect Current GPS Location"
+          title="Center on My Live Location"
           className="p-2.5 bg-white text-slate-700 rounded-full shadow-lg border border-slate-200 hover:bg-teal-50 hover:text-teal-700 transition-all flex items-center justify-center"
         >
           <Navigation className="w-5 h-5 text-teal-600" />
         </button>
       </div>
 
-      {/* Picker Mode Instruction Banner */}
-      {isPickerMode && (
-        <div className="absolute top-3 left-3 right-14 z-10 bg-white/95 backdrop-blur-sm border border-teal-200 rounded-lg px-3 py-2 shadow-md flex items-center gap-2 text-xs text-slate-800">
-          <MapPin className="w-4 h-4 text-teal-600 shrink-0" />
-          <span>Tap anywhere on the map or drag the pin to pinpoint the exact defect location.</span>
+      {/* Live GPS Telemetry Floating HUD Card */}
+      {liveGpsState?.isTracking && (
+        <div className="absolute bottom-4 left-4 z-10 bg-slate-900/90 backdrop-blur-md text-white p-3 rounded-xl shadow-xl border border-slate-700/80 max-w-xs text-xs space-y-2">
+          <div className="flex items-center justify-between gap-2 border-b border-slate-700/60 pb-1.5">
+            <div className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping inline-block" />
+              <span className="font-bold text-emerald-400">
+                {liveGpsState.isSimulated ? 'Simulated Field GPS' : 'Live Satellite GPS'}
+              </span>
+            </div>
+            <span className="text-[10px] text-slate-400">
+              Accuracy: ±{liveGpsState.accuracyMeters}m
+            </span>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2 text-center pt-0.5">
+            <div className="bg-slate-800/80 p-1.5 rounded-lg">
+              <div className="text-[10px] text-slate-400">Speed</div>
+              <div className="font-bold text-teal-300">{liveGpsState.speedKmh || 0} km/h</div>
+            </div>
+            <div className="bg-slate-800/80 p-1.5 rounded-lg">
+              <div className="text-[10px] text-slate-400">Walked</div>
+              <div className="font-bold text-teal-300">{liveGpsState.distanceWalkedMeters}m</div>
+            </div>
+            <div className="bg-slate-800/80 p-1.5 rounded-lg">
+              <div className="text-[10px] text-slate-400">Heading</div>
+              <div className="font-bold text-teal-300">{liveGpsState.headingDegrees}°</div>
+            </div>
+          </div>
+
+          <div className="text-[10px] text-slate-300 flex items-center justify-between pt-1">
+            <span>Lat: {liveGpsState.latitude.toFixed(5)}</span>
+            <span>Lng: {liveGpsState.longitude.toFixed(5)}</span>
+          </div>
         </div>
       )}
 
       {/* Legend pill */}
-      <div className="absolute bottom-4 left-4 z-10 bg-white/90 backdrop-blur-sm px-2.5 py-1.5 rounded-lg border border-slate-200 text-[11px] text-slate-700 shadow-sm flex items-center gap-3">
-        <span className="flex items-center gap-1 font-medium">
-          <span className="w-2 h-2 rounded-full bg-orange-600 inline-block" /> Pothole
-        </span>
-        <span className="flex items-center gap-1 font-medium">
-          <span className="w-2 h-2 rounded-full bg-blue-600 inline-block" /> Water
-        </span>
-        <span className="flex items-center gap-1 font-medium">
-          <span className="w-2 h-2 rounded-full bg-green-600 inline-block" /> Waste
-        </span>
-        <span className="text-slate-400">| MapLibre + OSM</span>
-      </div>
+      {!liveGpsState?.isTracking && (
+        <div className="absolute bottom-4 left-4 z-10 bg-white/90 backdrop-blur-sm px-2.5 py-1.5 rounded-lg border border-slate-200 text-[11px] text-slate-700 shadow-sm flex items-center gap-3">
+          <span className="flex items-center gap-1 font-medium">
+            <span className="w-2 h-2 rounded-full bg-orange-600 inline-block" /> Pothole
+          </span>
+          <span className="flex items-center gap-1 font-medium">
+            <span className="w-2 h-2 rounded-full bg-blue-600 inline-block" /> Water
+          </span>
+          <span className="flex items-center gap-1 font-medium">
+            <span className="w-2 h-2 rounded-full bg-green-600 inline-block" /> Waste
+          </span>
+          <span className="text-slate-400">| MapLibre + OSM</span>
+        </div>
+      )}
     </div>
   );
 };
+

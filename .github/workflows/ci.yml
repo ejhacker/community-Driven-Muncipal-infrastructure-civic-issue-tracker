@@ -33,8 +33,7 @@ jobs:
           NODE_ENV: production
           VITE_APP_URL: https://nagrikpulse.gov.in
 
-      - name: PostGIS Schema Verification
+      - name: Python Core & Geodesic Verification
         run: |
-          echo "Verifying PostGIS SQL syntax integrity..."
-          test -f supabase/migrations/20261005_civic_pulse_postgis_schema.sql
-          echo "Migration file valid!"
+          echo "Running NagrikPulse Python Core built-in test suite..."
+          python3 python_backend/app.py --test

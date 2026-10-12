@@ -19,17 +19,34 @@ import {
   ChevronRight,
   Shield,
   Layers,
+  Activity,
+  Footprints,
+  Compass,
+  Navigation,
+  Radio,
+  Terminal,
 } from 'lucide-react';
 import { Issue, UserRole, IssueCategory } from './types';
 import { Navbar } from './components/Navbar';
 import { MapLibreView } from './components/MapLibreView';
-import { ReportIssueModal } from './components/ReportIssueModal';
-import { IssueDetailModal } from './components/IssueDetailModal';
 import { OfficerDashboard } from './components/OfficerDashboard';
-import { TransparencyStatsView } from './components/TransparencyStats';
-import { SystemBlueprintModal } from './components/SystemBlueprintModal';
-import { getOfflineQueue, syncOfflineReports } from './utils/offlineQueue';
-import { Language, translations } from './utils/translations';
+import {
+  ReportIssueModal,
+  IssueDetailModal,
+  TransparencyStatsView,
+  SystemBlueprintModal,
+} from './components/CivicModals';
+import {
+  getOfflineQueue,
+  syncOfflineReports,
+  Language,
+  translations,
+  subscribeLiveGps,
+  startLiveGpsTracking,
+  stopLiveGpsTracking,
+  startSimulatedFieldWalk,
+  LiveGpsState,
+} from './utils';
 
 export default function App() {
   const [issues, setIssues] = useState<Issue[]>([]);
@@ -56,6 +73,24 @@ export default function App() {
   const [lowBandwidthMode, setLowBandwidthMode] = useState(false);
   const [offlineQueueCount, setOfflineQueueCount] = useState(0);
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
+
+  // Live GPS Telemetry State & Python Backend Core Status
+  const [liveGpsState, setLiveGpsState] = useState<LiveGpsState>({
+    isTracking: false,
+    latitude: 28.4089,
+    longitude: 77.3178,
+    accuracyMeters: 3.5,
+    altitudeMeters: 210,
+    speedKmh: 0,
+    headingDegrees: 0,
+    timestamp: new Date().toISOString(),
+    distanceWalkedMeters: 0,
+    pathHistory: [[28.4089, 77.3178]],
+    isSimulated: false,
+    nearestIssueDistanceMeters: null,
+    nearestIssueTitle: null,
+  });
+  const [pythonEngineActive, setPythonEngineActive] = useState<boolean>(true);
 
   const t = translations[lang];
 
@@ -120,12 +155,42 @@ export default function App() {
       );
     }
 
+    // Subscribe to continuous live GPS tracking updates
+    const unsubscribeGps = subscribeLiveGps((state) => {
+      setLiveGpsState(state);
+      setUserLocation({ lat: state.latitude, lng: state.longitude });
+    });
+
+    // Check Python backend engine status
+    fetch('/api/python-status')
+      .then((r) => r.json())
+      .then((data) => setPythonEngineActive(Boolean(data.online)))
+      .catch(() => setPythonEngineActive(false));
+
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('nagrikpulse:offline-queue-updated', handleQueueChange);
+      unsubscribeGps();
     };
   }, []);
+
+  const handleToggleLiveTracking = () => {
+    if (liveGpsState.isTracking) {
+      stopLiveGpsTracking();
+    } else {
+      startLiveGpsTracking(
+        undefined,
+        issues.map((i) => ({ latitude: i.latitude, longitude: i.longitude, title: i.title }))
+      );
+    }
+  };
+
+  const handleSimulateWalk = () => {
+    startSimulatedFieldWalk(
+      issues.map((i) => ({ latitude: i.latitude, longitude: i.longitude, title: i.title }))
+    );
+  };
 
   const handleSyncOffline = async () => {
     const { syncedCount } = await syncOfflineReports();
@@ -193,6 +258,115 @@ export default function App() {
         ) : (
           /* Split View: Map + Issues Feed */
           <div className="space-y-4">
+            {/* Live GPS Telemetry & Field Force HUD Banner */}
+            <div className="bg-gradient-to-r from-slate-900 via-teal-950 to-slate-900 text-white p-3.5 sm:p-4 rounded-xl border border-teal-500/30 shadow-md">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="relative">
+                    <div className="w-10 h-10 rounded-xl bg-teal-800/80 border border-teal-400/40 flex items-center justify-center text-teal-200">
+                      <Radio className={`w-5 h-5 ${liveGpsState.isTracking ? 'animate-pulse text-teal-300' : 'text-slate-400'}`} />
+                    </div>
+                    {liveGpsState.isTracking && (
+                      <span className="absolute -top-1 -right-1 w-3 h-3 bg-emerald-400 border-2 border-slate-900 rounded-full animate-ping" />
+                    )}
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-teal-400">
+                        Live GPS Telemetry
+                      </span>
+                      <span
+                        className={`text-[10px] font-mono px-2 py-0.2 rounded-full font-bold ${
+                          liveGpsState.isTracking
+                            ? liveGpsState.isSimulated
+                              ? 'bg-blue-500/30 text-blue-200 border border-blue-400/40'
+                              : 'bg-emerald-500/30 text-emerald-200 border border-emerald-400/40'
+                            : 'bg-slate-700 text-slate-300'
+                        }`}
+                      >
+                        {liveGpsState.isTracking
+                          ? liveGpsState.isSimulated
+                            ? '● SIMULATED FIELD SURVEY'
+                            : '● LIVE GPS ACTIVE (watchPosition)'
+                          : '○ GPS IDLE'}
+                      </span>
+                      {pythonEngineActive && (
+                        <span className="hidden lg:inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.2 rounded bg-amber-500/20 text-amber-200 border border-amber-500/30">
+                          🐍 Python Core (5050) Synced
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-sm sm:text-base font-mono font-bold tracking-tight text-white flex items-center gap-2">
+                      <span>
+                        {liveGpsState.latitude.toFixed(4)}° N, {liveGpsState.longitude.toFixed(4)}° E
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Telemetry Metrics Grid */}
+                <div className="flex items-center gap-2 sm:gap-3 text-xs font-mono">
+                  <div className="bg-slate-800/80 px-2.5 py-1.5 rounded-lg border border-slate-700/80 text-center">
+                    <span className="text-[9px] text-slate-400 block uppercase">Accuracy</span>
+                    <span className="text-teal-300 font-bold">±{liveGpsState.accuracyMeters.toFixed(1)}m</span>
+                  </div>
+                  <div className="bg-slate-800/80 px-2.5 py-1.5 rounded-lg border border-slate-700/80 text-center">
+                    <span className="text-[9px] text-slate-400 block uppercase">Speed</span>
+                    <span className="text-sky-300 font-bold">{(liveGpsState.speedKmh || 0).toFixed(1)} km/h</span>
+                  </div>
+                  <div className="bg-slate-800/80 px-2.5 py-1.5 rounded-lg border border-slate-700/80 text-center">
+                    <span className="text-[9px] text-slate-400 block uppercase">Heading</span>
+                    <span className="text-amber-300 font-bold">{Math.round(liveGpsState.headingDegrees || 0)}°</span>
+                  </div>
+                  <div className="bg-slate-800/80 px-2.5 py-1.5 rounded-lg border border-slate-700/80 text-center">
+                    <span className="text-[9px] text-slate-400 block uppercase">Tracked</span>
+                    <span className="text-emerald-300 font-bold">{liveGpsState.distanceWalkedMeters}m</span>
+                  </div>
+                </div>
+
+                {/* Controls */}
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleToggleLiveTracking}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all shadow-sm flex items-center gap-1.5 ${
+                      liveGpsState.isTracking
+                        ? 'bg-rose-600 hover:bg-rose-700 text-white'
+                        : 'bg-teal-600 hover:bg-teal-500 text-white'
+                    }`}
+                  >
+                    <Activity className="w-3.5 h-3.5" />
+                    <span>{liveGpsState.isTracking ? 'Stop GPS' : 'Start Live GPS'}</span>
+                  </button>
+                  <button
+                    onClick={handleSimulateWalk}
+                    className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-lg text-xs font-medium text-slate-200 transition-all flex items-center gap-1"
+                    title="Simulate continuous field survey movement along Mathura Road for testing"
+                  >
+                    <Footprints className="w-3.5 h-3.5 text-blue-300" />
+                    <span className="hidden sm:inline">Simulate Walk</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Proximity Hazard Alert Banner if near open issue */}
+              {liveGpsState.isTracking &&
+                liveGpsState.nearestIssueDistanceMeters !== null &&
+                liveGpsState.nearestIssueDistanceMeters <= 50 && (
+                  <div className="mt-2.5 p-2.5 bg-rose-500/20 border border-rose-500/40 rounded-lg text-xs text-rose-200 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-300 shrink-0" />
+                      <span>
+                        <strong>Proximity Warning:</strong> You are {liveGpsState.nearestIssueDistanceMeters}m from an open issue:{' '}
+                        <em>{liveGpsState.nearestIssueTitle}</em>
+                      </span>
+                    </div>
+                    <span className="bg-rose-600 text-white font-mono text-[10px] px-2 py-0.5 rounded font-bold">
+                      Defect Alert
+                    </span>
+                  </div>
+                )}
+            </div>
+
             {/* Filter and Search Bar */}
             <div className="bg-white p-3 sm:p-4 rounded-xl border border-slate-200 shadow-xs space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2.5">
@@ -416,6 +590,9 @@ export default function App() {
                   onSelectIssue={(issue) => setSelectedIssue(issue)}
                   lowBandwidthMode={lowBandwidthMode}
                   userCoordinates={userLocation}
+                  liveGpsState={liveGpsState}
+                  onToggleLiveTracking={handleToggleLiveTracking}
+                  onSimulateWalk={handleSimulateWalk}
                 />
               </div>
             </div>
@@ -441,6 +618,7 @@ export default function App() {
         lang={lang}
         isOnline={isOnline}
         lowBandwidthMode={lowBandwidthMode}
+        currentLiveGps={liveGpsState.isTracking ? { lat: liveGpsState.latitude, lng: liveGpsState.longitude } : userLocation}
       />
 
       {/* Issue Detail Modal */}
